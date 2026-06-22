@@ -14,12 +14,13 @@ from PIL import Image
 import SimpleITK as sitk
 import torch
 import torch.multiprocessing as mp
-from sam2.build_sam import build_sam2_video_predictor_npz
+from sam2.build_sam import build_sam2_video_predictor_npz, get_best_available_device
 from huggingface_hub import hf_hub_download
 
 torch.set_float32_matmul_precision('high')
 torch.manual_seed(2024)
-torch.cuda.manual_seed(2024)
+if torch.cuda.is_available():
+    torch.cuda.manual_seed(2024)
 np.random.seed(2024)
 
 parser = argparse.ArgumentParser()
@@ -114,6 +115,7 @@ if checkpoint == 'medsam2_recist':
     print(f'using medsam2 baseline recist model: {ckpt_path}')
 
 predictor = build_sam2_video_predictor_npz(model_cfg, ckpt_path)
+device = get_best_available_device()
 
 os.makedirs(pred_save_dir, exist_ok=True)
 if save_overlay:
@@ -306,12 +308,12 @@ def infer_3d(img_npz_file):
         img_resized = resize_grayscale_to_rgb_and_resize(img_3D_ori, 512) #1024) #d, 3, 1024, 1024
     else:
         img_resized = img_3D_ori[:,None].repeat(3, axis=1) # d, 3, 1024, 1024
-    img_resized = img_resized / 255.0
-    img_resized = torch.from_numpy(img_resized).cuda()
+    img_resized = (img_resized / 255.0).astype(np.float32)
+    img_resized = torch.from_numpy(img_resized).to(device)
     img_mean=(0.485, 0.456, 0.406)
     img_std=(0.229, 0.224, 0.225)
-    img_mean = torch.tensor(img_mean, dtype=torch.float32)[:, None, None].cuda()
-    img_std = torch.tensor(img_std, dtype=torch.float32)[:, None, None].cuda()
+    img_mean = torch.tensor(img_mean, dtype=torch.float32)[:, None, None].to(device)
+    img_std = torch.tensor(img_std, dtype=torch.float32)[:, None, None].to(device)
     img_resized -= img_mean
     img_resized /= img_std
 
@@ -336,7 +338,8 @@ def infer_3d(img_npz_file):
         z_mids.append(z_mid)
         
         # add prompt to initialize the predictor
-        with torch.inference_mode(), torch.autocast("cuda", dtype=torch.bfloat16):
+        autocast_device = "cuda" if device == "cuda" else "cpu"
+        with torch.inference_mode(), torch.autocast(autocast_device, dtype=torch.bfloat16):
             inference_state = predictor.init_state(img_resized, video_height, video_width)
             if propagate_with_box:
                 print('propagate with box')

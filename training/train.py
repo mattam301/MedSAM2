@@ -277,6 +277,11 @@ if __name__ == "__main__":
     
     # Override dataset folder and experiment output path if specified
     cfg = compose(config_name=args.config)
+    # Some generated configs may be composed under a top-level `configs` node
+    # if the Hydra package directive is missing. Accept that wrapped shape and
+    # unwrap it so the training entry point remains usable.
+    if "launcher" not in cfg and "configs" in cfg and "launcher" in cfg.configs:
+        cfg = cfg.configs
     if args.dataset_path is not None:
         cfg.dataset.folder = args.dataset_path
     if args.output_path is not None:

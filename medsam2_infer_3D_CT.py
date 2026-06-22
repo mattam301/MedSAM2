@@ -13,13 +13,14 @@ from PIL import Image
 import SimpleITK as sitk
 import torch
 import torch.multiprocessing as mp
-from sam2.build_sam import build_sam2_video_predictor_npz
+from sam2.build_sam import build_sam2_video_predictor_npz, get_best_available_device
 import SimpleITK as sitk
 from skimage import measure, morphology
 
 torch.set_float32_matmul_precision('high')
 torch.manual_seed(2024)
-torch.cuda.manual_seed(2024)
+if torch.cuda.is_available():
+    torch.cuda.manual_seed(2024)
 np.random.seed(2024)
 
 parser = argparse.ArgumentParser()
@@ -195,7 +196,8 @@ seg_info['nii_name'] = []
 seg_info['key_slice_index'] = []
 seg_info['DICOM_windows'] = []
 # initialized predictor
-predictor = build_sam2_video_predictor_npz(model_cfg, checkpoint)
+device = get_best_available_device()
+predictor = build_sam2_video_predictor_npz(model_cfg, checkpoint, device=device)
 
 for nii_fname in tqdm(nii_fnames):
     # get corresponding case info
@@ -243,17 +245,18 @@ for nii_fname in tqdm(nii_fnames):
         video_height = key_slice_img.shape[0]
         video_width = key_slice_img.shape[1]
         img_resized = resize_grayscale_to_rgb_and_resize(img_3D_ori, 512)
-        img_resized = img_resized / 255.0
-        img_resized = torch.from_numpy(img_resized).cuda()
+        img_resized = (img_resized / 255.0).astype(np.float32)
+        img_resized = torch.from_numpy(img_resized).to(device)
         img_mean=(0.485, 0.456, 0.406)
         img_std=(0.229, 0.224, 0.225)
-        img_mean = torch.tensor(img_mean, dtype=torch.float32)[:, None, None].cuda()
-        img_std = torch.tensor(img_std, dtype=torch.float32)[:, None, None].cuda()
+        img_mean = torch.tensor(img_mean, dtype=torch.float32)[:, None, None].to(device)
+        img_std = torch.tensor(img_std, dtype=torch.float32)[:, None, None].to(device)
         img_resized -= img_mean
         img_resized /= img_std
         z_mids = []
 
-        with torch.inference_mode(), torch.autocast("cuda", dtype=torch.bfloat16):
+        autocast_device = "cuda" if device == "cuda" else "cpu"
+        with torch.inference_mode(), torch.autocast(autocast_device, dtype=torch.bfloat16):
             inference_state = predictor.init_state(img_resized, video_height, video_width)
             if propagate_with_box:
                 _, out_obj_ids, out_mask_logits = predictor.add_new_points_or_box(

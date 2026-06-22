@@ -9,7 +9,7 @@ import logging
 import os
 from dataclasses import dataclass
 
-from typing import List, Optional
+from typing import List, Optional, Tuple
 
 import pandas as pd
 
@@ -27,6 +27,8 @@ from training.dataset.vos_segment_loader import (
     SA1BSegmentLoader,
     NPZSegmentLoader
 )
+
+_WARNED_MULTICHANNEL_CASES = set()
 
 
 @dataclass
@@ -53,6 +55,68 @@ class VOSRawDataset:
 
     def get_video(self, idx):
         raise NotImplementedError()
+
+
+def _normalize_npz_case(
+    imgs: np.ndarray,
+    gts: np.ndarray,
+    npz_path: str,
+    image_channel_index: int = 0,
+) -> Tuple[np.ndarray, np.ndarray]:
+    """Normalize supported NPZ layouts to depth-first grayscale volumes."""
+    imgs = np.asarray(imgs)
+    gts = np.asarray(gts)
+
+    if gts.ndim == 2:
+        if imgs.ndim == 2:
+            imgs = imgs[None, ...]
+        elif imgs.ndim == 3 and imgs.shape[:2] == gts.shape and imgs.shape[2] >= 1:
+            channel_index = min(image_channel_index, imgs.shape[2] - 1)
+            if imgs.shape[2] > 1 and npz_path not in _WARNED_MULTICHANNEL_CASES:
+                logging.warning(
+                    "NPZRawDataset using channel %d from multi-channel 2D input %s with shape %s",
+                    channel_index,
+                    npz_path,
+                    imgs.shape,
+                )
+                _WARNED_MULTICHANNEL_CASES.add(npz_path)
+            imgs = imgs[..., channel_index][None, ...]
+        else:
+            raise ValueError(
+                f"Unsupported 2D NPZ image layout for {npz_path}: "
+                f"imgs shape={imgs.shape}, gts shape={gts.shape}"
+            )
+        gts = gts[None, ...]
+    elif gts.ndim == 3:
+        if imgs.ndim == 3 and imgs.shape == gts.shape:
+            pass
+        elif imgs.ndim == 4 and imgs.shape[:3] == gts.shape and imgs.shape[3] >= 1:
+            channel_index = min(image_channel_index, imgs.shape[3] - 1)
+            if imgs.shape[3] > 1 and npz_path not in _WARNED_MULTICHANNEL_CASES:
+                logging.warning(
+                    "NPZRawDataset using channel %d from multi-channel volume %s with shape %s",
+                    channel_index,
+                    npz_path,
+                    imgs.shape,
+                )
+                _WARNED_MULTICHANNEL_CASES.add(npz_path)
+            imgs = imgs[..., channel_index]
+        else:
+            raise ValueError(
+                f"Unsupported 3D NPZ image layout for {npz_path}: "
+                f"imgs shape={imgs.shape}, gts shape={gts.shape}"
+            )
+    else:
+        raise ValueError(
+            f"Unsupported NPZ mask layout for {npz_path}: gts shape={gts.shape}"
+        )
+
+    if imgs.shape != gts.shape:
+        raise ValueError(
+            f"Normalized NPZ shapes do not match for {npz_path}: "
+            f"imgs shape={imgs.shape}, gts shape={gts.shape}"
+        )
+    return imgs, gts
 
 
 class PNGRawDataset(VOSRawDataset):
@@ -154,10 +218,12 @@ class NPZRawDataset(VOSRawDataset):
         excluded_videos_list_txt=None,
         sample_rate=1,
         truncate_video=-1,
+        image_channel_index=0,
     ):
         self.folder = folder
         self.sample_rate = sample_rate
         self.truncate_video = truncate_video
+        self.image_channel_index = image_channel_index
 
         # Read all npz files from folder and its subfolders
         subset = []
@@ -196,12 +262,17 @@ class NPZRawDataset(VOSRawDataset):
         # Load NPZ file
         npz_data = np.load(npz_path)
         
-        # Extract frames and masks
-        frames = npz_data['imgs'] / 255.0
-        # Expand the grayscale images to three channels
-        frames = np.repeat(frames[:, np.newaxis, :, :], 3, axis=1)  # (img_num, 3, H, W)
-        masks = npz_data['gts']
-        
+        # Extract frames and masks, accepting both volume NPZs and single-slice NPZs.
+        frames, masks = _normalize_npz_case(
+            npz_data["imgs"],
+            npz_data["gts"],
+            npz_path=npz_path,
+            image_channel_index=self.image_channel_index,
+        )
+        frames = frames.astype(np.float32) / 255.0
+        # Expand grayscale images to 3 channels for the SAM image encoder.
+        frames = np.repeat(frames[:, np.newaxis, :, :], 3, axis=1)
+
         if self.truncate_video > 0:
             frames = frames[:self.truncate_video]
             masks = masks[:self.truncate_video]

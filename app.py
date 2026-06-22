@@ -23,7 +23,7 @@ import torch
 import numpy as np
 import matplotlib.pyplot as plt
 from PIL import Image
-from sam2.build_sam import build_sam2
+from sam2.build_sam import build_sam2, get_best_available_device
 from sam2.sam2_image_predictor import SAM2ImagePredictor
 from sam2.build_sam import build_sam2_video_predictor
 import cv2
@@ -41,7 +41,8 @@ def reset(seg_tracker):
         del image_predictor
         del seg_tracker
         gc.collect()
-        torch.cuda.empty_cache()
+        if torch.cuda.is_available():
+            torch.cuda.empty_cache()
     return None, ({}, {}), None, None, 0, None, None, None, 0, 0, 
 
 def extract_video_info(input_video):
@@ -84,13 +85,15 @@ def get_meta_from_video(session_id, input_video, scale_slider, config_path, chec
     first_frame = cv2.imread(first_frame_path)
     first_frame_rgb = cv2.cvtColor(first_frame, cv2.COLOR_BGR2RGB)
 
-    torch.autocast(device_type="cuda", dtype=torch.bfloat16).__enter__()
-    if torch.cuda.get_device_properties(0).major >= 8:
+    _device = get_best_available_device()
+    _autocast_device = "cuda" if _device == "cuda" else "cpu"
+    torch.autocast(device_type=_autocast_device, dtype=torch.bfloat16).__enter__()
+    if torch.cuda.is_available() and torch.cuda.get_device_properties(0).major >= 8:
         torch.backends.cuda.matmul.allow_tf32 = True
         torch.backends.cudnn.allow_tf32 = True
    
-    predictor = build_sam2_video_predictor(config_path, checkpoint_path, device="cuda")
-    sam2_model = build_sam2(config_path, checkpoint_path, device="cuda")
+    predictor = build_sam2_video_predictor(config_path, checkpoint_path, device=_device)
+    sam2_model = build_sam2(config_path, checkpoint_path, device=_device)
     image_predictor = SAM2ImagePredictor(sam2_model)
     inference_state = predictor.init_state(video_path=output_dir)
     predictor.reset_state(inference_state)
